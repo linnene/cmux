@@ -51,16 +51,35 @@ jobs:
             ~/.cargo/git
             cmux-tui/target
           key: viewer-tui-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('cmux-tui/Cargo.lock', 'cmux-tui/rust-toolchain.toml') }}
+      - name: Restore native app build progress
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ runner.temp }}/viewer-app-dd
+            ${{ runner.temp }}/viewer-app-spm
+          key: viewer-app-batch-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: viewer-app-batch-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Build tagged app
         timeout-minutes: 55
         run: |
           set -euo pipefail
+          printf '%s\n' 'SWIFT_ENABLE_BATCH_MODE = YES' > "$RUNNER_TEMP/viewer-ci.xcconfig"
+          export XCODE_XCCONFIG_FILE="$RUNNER_TEMP/viewer-ci.xcconfig"
+          export FileSystemMode=checksum-only
           CMUX_TUI_CLIENT_LOCAL="$PWD/cmux-tui/target/debug/cmux-tui" CMUX_SOURCE_PACKAGES_DIR="$RUNNER_TEMP/viewer-app-spm" ./scripts/reload.sh --tag claude-viewer-31224 --derived-data "$RUNNER_TEMP/viewer-app-dd" &
           build_pid=$!
           (while kill -0 "$build_pid" 2>/dev/null; do sleep 60; tail -n 8 /tmp/cmux-reload-claude-viewer-31224.log || true; done) &
           reporter_pid=$!
           trap 'kill "$reporter_pid" 2>/dev/null || true' EXIT
           wait "$build_pid"
+      - name: Save native app build progress
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ runner.temp }}/viewer-app-dd
+            ${{ runner.temp }}/viewer-app-spm
+          key: viewer-app-batch-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
       - name: Package tagged app
         run: |
           set -euo pipefail
