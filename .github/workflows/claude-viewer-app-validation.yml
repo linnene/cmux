@@ -8,7 +8,7 @@ jobs:
   tagged-app:
     if: github.repository == 'linnene/cmux'
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       CMUX_DEV_BACKEND_MODE: local
       CMUX_RELOAD_NO_GLOBAL_CLI_LINKS: '1'
@@ -31,7 +31,8 @@ jobs:
       - name: Set up pinned TUI Rust
         uses: ./.github/actions/setup-cmux-tui-rust
       - name: Cache native build inputs
-        uses: actions/cache@v4
+        id: tui-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -41,16 +42,41 @@ jobs:
       - name: Build snapshot TUI client
         working-directory: cmux-tui
         run: cargo build -p cmux-tui --bin cmux-tui --locked
+      - name: Save TUI build cache after compilation
+        if: steps.tui-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cmux-tui/target
+          key: viewer-tui-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('cmux-tui/Cargo.lock', 'cmux-tui/rust-toolchain.toml') }}
       - name: Build tagged app
-        run: CMUX_TUI_CLIENT_LOCAL="$PWD/cmux-tui/target/debug/cmux-tui" CMUX_SOURCE_PACKAGES_DIR="$RUNNER_TEMP/viewer-app-spm" ./scripts/reload.sh --tag claude-viewer-31224 --derived-data "$RUNNER_TEMP/viewer-app-dd"
+        timeout-minutes: 55
+        run: |
+          set -euo pipefail
+          CMUX_TUI_CLIENT_LOCAL="$PWD/cmux-tui/target/debug/cmux-tui" CMUX_SOURCE_PACKAGES_DIR="$RUNNER_TEMP/viewer-app-spm" ./scripts/reload.sh --tag claude-viewer-31224 --derived-data "$RUNNER_TEMP/viewer-app-dd" &
+          build_pid=$!
+          (while kill -0 "$build_pid" 2>/dev/null; do sleep 60; tail -n 8 /tmp/cmux-reload-claude-viewer-31224.log || true; done) &
+          reporter_pid=$!
+          trap 'kill "$reporter_pid" 2>/dev/null || true' EXIT
+          wait "$build_pid"
       - name: Package tagged app
         run: |
           set -euo pipefail
           APP="$RUNNER_TEMP/viewer-app-dd/Build/Products/Debug/cmux DEV claude-viewer-31224.app"
           test -x "$APP/Contents/MacOS/cmux DEV"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" | grep -Fx com.cmuxterm.app.debug.claude-viewer-31224
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" | grep -Fx com.cmuxterm.app.debug.claude.viewer.31224
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$RUNNER_TEMP/claude-viewer-31224.zip"
           shasum -a 256 "$RUNNER_TEMP/claude-viewer-31224.zip" > "$RUNNER_TEMP/claude-viewer-31224.sha256"
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-viewer-app-diagnostics
+          path: /tmp/cmux-reload-*.log
+          if-no-files-found: ignore
+          retention-days: 3
       - name: Upload tagged validation app
         uses: actions/upload-artifact@v4
         with:
