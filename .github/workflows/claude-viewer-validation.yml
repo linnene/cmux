@@ -23,6 +23,8 @@ jobs:
           python3 tests/test_claude_attached_viewer_policy.py
       - name: Swift package tests
         run: swift test --package-path Packages/macOS/CMUXAgentLaunch
+      - name: Fetch required local package
+        run: git submodule update --init --depth 1 vendor/bonsplit
       - name: Resolve packages
         run: scripts/ci/compile-app-host-test-product.sh resolve "$RUNNER_TEMP/viewer-dd" "$RUNNER_TEMP/viewer-spm"
       - name: Build candidate CLI product
