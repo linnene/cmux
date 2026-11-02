@@ -28,8 +28,21 @@ jobs:
         run: |
           ./scripts/install-zig-ci.sh
           ./scripts/install-rust-ci.sh
+      - name: Set up pinned TUI Rust
+        uses: ./.github/actions/setup-cmux-tui-rust
+      - name: Cache native build inputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            cmux-tui/target
+          key: viewer-tui-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('cmux-tui/Cargo.lock', 'cmux-tui/rust-toolchain.toml') }}
+      - name: Build snapshot TUI client
+        working-directory: cmux-tui
+        run: cargo build -p cmux-tui --bin cmux-tui --locked
       - name: Build tagged app
-        run: CMUX_SOURCE_PACKAGES_DIR="$RUNNER_TEMP/viewer-app-spm" ./scripts/reload.sh --tag claude-viewer-31224 --derived-data "$RUNNER_TEMP/viewer-app-dd"
+        run: CMUX_TUI_CLIENT_LOCAL="$PWD/cmux-tui/target/debug/cmux-tui" CMUX_SOURCE_PACKAGES_DIR="$RUNNER_TEMP/viewer-app-spm" ./scripts/reload.sh --tag claude-viewer-31224 --derived-data "$RUNNER_TEMP/viewer-app-dd"
       - name: Package tagged app
         run: |
           set -euo pipefail
