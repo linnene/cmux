@@ -25,6 +25,14 @@ jobs:
         run: swift test --package-path Packages/macOS/CMUXAgentLaunch
       - name: Fetch required local package
         run: git submodule update --init --depth 1 vendor/bonsplit
+      - name: Fetch pinned GhosttyKit for Xcode package resolution
+        env:
+          GHOSTTYKIT_DOWNLOAD_RETRIES: '3'
+          GHOSTTYKIT_DOWNLOAD_MAX_TIME: '180'
+        run: |
+          set -euo pipefail
+          export GHOSTTY_SHA="$(git rev-parse HEAD:ghostty)"
+          ./scripts/download-prebuilt-ghosttykit.sh
       - name: Resolve packages
         run: scripts/ci/compile-app-host-test-product.sh resolve "$RUNNER_TEMP/viewer-dd" "$RUNNER_TEMP/viewer-spm"
       - name: Build candidate CLI product
