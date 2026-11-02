@@ -14,7 +14,6 @@ jobs:
       CMUX_RELOAD_NO_GLOBAL_CLI_LINKS: '1'
       CMUX_GHOSTTYKIT_PREPROVISIONED: '1'
       CMUX_SKIP_ZIG_BUILD: '1'
-      CMUX_SOURCE_PACKAGES_DIR: ${{ runner.temp }}/viewer-app-spm
       GHOSTTYKIT_DOWNLOAD_RETRIES: '3'
       GHOSTTYKIT_DOWNLOAD_MAX_TIME: '180'
     steps:
@@ -30,7 +29,7 @@ jobs:
           ./scripts/install-zig-ci.sh
           ./scripts/install-rust-ci.sh
       - name: Build tagged app
-        run: ./scripts/reload.sh --tag claude-viewer-31224 --derived-data "$RUNNER_TEMP/viewer-app-dd"
+        run: CMUX_SOURCE_PACKAGES_DIR="$RUNNER_TEMP/viewer-app-spm" ./scripts/reload.sh --tag claude-viewer-31224 --derived-data "$RUNNER_TEMP/viewer-app-dd"
       - name: Package tagged app
         run: |
           set -euo pipefail
