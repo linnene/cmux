@@ -1,0 +1,46 @@
+name: Fork Claude viewer validation
+on:
+  push:
+    branches: [codex/claude-viewer-validation]
+permissions:
+  contents: read
+jobs:
+  cli-regression:
+    if: github.repository == 'linnene/cmux'
+    runs-on: macos-26
+    timeout-minutes: 35
+    env:
+      CMUX_PRODUCT_PROFILE: cli
+      CMUX_DEV_BACKEND_MODE: local
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: ./scripts/select-ci-xcode.sh
+      - name: Portable observer and policy tests
+        run: |
+          set -euo pipefail
+          node --test tests/test_claude_attach_observer.cjs
+          python3 tests/test_claude_attached_viewer_policy.py
+      - name: Swift package tests
+        run: swift test --package-path Packages/macOS/CMUXAgentLaunch
+      - name: Resolve packages
+        run: scripts/ci/compile-app-host-test-product.sh resolve "$RUNNER_TEMP/viewer-dd" "$RUNNER_TEMP/viewer-spm"
+      - name: Build candidate CLI product
+        run: scripts/ci/compile-app-host-test-product.sh build "$RUNNER_TEMP/viewer-dd" "$RUNNER_TEMP/viewer-spm" "$RUNNER_TEMP/viewer-cas" "$RUNNER_TEMP/viewer-build.log"
+      - name: Active-session and hook regression
+        run: |
+          set -euo pipefail
+          export CMUX_CLI_BIN="$RUNNER_TEMP/viewer-dd/Build/Products/Debug/cmux"
+          test -x "$CMUX_CLI_BIN"
+          python3 tests/test_claude_viewer_active_session.py
+          python3 tests/test_claude_hook_clear_running_status.py
+      - name: Upload build receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-viewer-cli-receipts
+          path: |
+            ${{ runner.temp }}/viewer-build.log
+            ${{ runner.temp }}/viewer-dd/*-build.log
+          if-no-files-found: ignore
+          retention-days: 7
