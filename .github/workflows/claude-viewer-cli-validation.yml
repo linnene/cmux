@@ -1,0 +1,63 @@
+name: Fork CLI-only validation build
+on:
+  push:
+    branches: [codex/claude-viewer-cli-validation]
+permissions:
+  contents: read
+concurrency:
+  group: claude-viewer-cli-validation
+  cancel-in-progress: false
+jobs:
+  cli:
+    if: github.repository == 'linnene/cmux'
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      CMUX_DEV_BACKEND_MODE: local
+      CMUX_SKIP_ZIG_BUILD: '1'
+      CMUX_GHOSTTYKIT_PREPROVISIONED: '1'
+      GHOSTTYKIT_DOWNLOAD_RETRIES: '3'
+      GHOSTTYKIT_DOWNLOAD_MAX_TIME: '180'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: ./scripts/select-ci-xcode.sh
+      - name: Fetch native build inputs
+        run: git submodule update --init --depth 1 vendor/bonsplit ghostty
+      - name: Fetch pinned GhosttyKit
+        run: ./scripts/download-prebuilt-ghosttykit.sh
+      - name: Restore native build progress
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ runner.temp }}/viewer-app-dd
+            ${{ runner.temp }}/viewer-app-spm
+          key: viewer-app-batch-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: viewer-app-batch-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Build cmux-cli only
+        timeout-minutes: 24
+        run: |
+          set -euo pipefail
+          xcodebuild -project cmux.xcodeproj -scheme cmux-cli -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/viewer-app-dd" \
+            CODE_SIGNING_ALLOWED=NO build
+      - name: Package CLI
+        run: |
+          set -euo pipefail
+          BIN="$RUNNER_TEMP/viewer-app-dd/Build/Products/Debug/cmux"
+          test -x "$BIN"
+          file "$BIN"
+          shasum -a 256 "$BIN" | tee "$RUNNER_TEMP/cmux-cli.sha256"
+          ditto -c -k --sequesterRsrc "$BIN" "$RUNNER_TEMP/cmux-cli.zip"
+          shasum -a 256 "$RUNNER_TEMP/cmux-cli.zip" | tee "$RUNNER_TEMP/cmux-cli-zip.sha256"
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmux-cli
+          path: |
+            ${{ runner.temp }}/cmux-cli.zip
+            ${{ runner.temp }}/cmux-cli.sha256
+            ${{ runner.temp }}/cmux-cli-zip.sha256
+          retention-days: 3
+          if-no-files-found: error
