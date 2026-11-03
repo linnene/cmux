@@ -25,6 +25,34 @@
 import Foundation
 
 extension CMUXCLI {
+    /// Diagnostic-only branch logging. Enabled explicitly by a sentinel file
+    /// beside the worker's PWD; records branch labels and short IDs only.
+    func stopDeliveryDiag(
+        _ label: String,
+        _ fields: [(String, String)] = [],
+        env: [String: String] = ProcessInfo.processInfo.environment
+    ) {
+        guard let pwd = env["PWD"], pwd.hasPrefix("/") else { return }
+        let sentinel = pwd + "/.cmux-stop-diag-enabled"
+        guard FileManager.default.fileExists(atPath: sentinel) else { return }
+        func short(_ value: String?) -> String {
+            guard let value, !value.isEmpty else { return "nil" }
+            return String(value.prefix(8))
+        }
+        let stamp = String(format: "%.3f", Date().timeIntervalSince1970)
+        let body = ([label] + fields.map { "\($0.0)=\($0.1)" }).joined(separator: " ")
+        let line = "\(stamp) \(body)\n"
+        let path = pwd + "/.cmux-stop-diag.log"
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
     struct AgentHookDeliveryTarget {
         let workspaceId: String
         let surfaceId: String
@@ -68,11 +96,28 @@ extension CMUXCLI {
     ) throws -> AgentHookDeliveryTarget? {
         let pidProbeAllowed = routing.allowsPidProbe && routing.preferCallerTTYRouting
         let rehomeAllowed = routing.preferCallerTTYRouting
+        func diagShort(_ value: String?) -> String {
+            guard let value, !value.isEmpty else { return "nil" }
+            return String(value.prefix(8))
+        }
+        stopDeliveryDiag("resolve.entry", [
+            ("pidProbe", pidProbeAllowed ? "1" : "0"),
+            ("allowsPid", routing.allowsPidProbe ? "1" : "0"),
+            ("tty", routing.preferCallerTTYRouting ? "1" : "0"),
+            ("rehome", rehomeAllowed ? "1" : "0"),
+            ("ws", diagShort(routing.workspaceArg)),
+            ("surf", diagShort(routing.surfaceArg)),
+            ("explicit", routing.surfaceFlagIsExplicit ? "1" : "0"),
+            ("recSurf", diagShort(mappedSession?.surfaceId)),
+        ])
         if pidProbeAllowed {
             switch liveAgentPidDeliveryTarget(pid: routing.agentPid, client: client) {
             case .resolved(let live):
+                stopDeliveryDiag("resolve.pid.resolved", [
+                    ("ws", diagShort(live.workspaceId)), ("surf", diagShort(live.surfaceId))])
                 return live
             case .failed:
+                stopDeliveryDiag("resolve.pid.failed", [("surf", diagShort(routing.surfaceArg))])
                 // A present resolver rejected the current invocation pid. Do
                 // not promote spawn-environment identity for a fresh session:
                 // only matching persisted-record + invocation surface identity
@@ -85,7 +130,14 @@ extension CMUXCLI {
                           surfaceId: invocationSurfaceId,
                           claimedWorkspaceId: mappedSession?.workspaceId ?? routing.workspaceArg,
                           client: client
-                      ) else { return nil }
+                      ) else {
+                    stopDeliveryDiag("resolve.pid.failed.reject", [
+                        ("inv", diagShort(invocationSurfaceId)),
+                        ("rec", diagShort(recordedSurfaceId))])
+                    return nil
+                }
+                stopDeliveryDiag("resolve.pid.failed.corroborated", [
+                    ("surf", diagShort(corroborated.surfaceId))])
                 return corroborated
             case .notAttempted, .unsupported:
                 break
@@ -100,14 +152,25 @@ extension CMUXCLI {
         if !routing.allowsPidProbe, rehomeAllowed {
             let invocationSurfaceId = nonEmptyClaudeHookIdentifier(routing.surfaceArg)
             let recordedSurfaceId = nonEmptyClaudeHookIdentifier(mappedSession?.surfaceId)
-            guard let invocationSurfaceId else { return nil }
+            stopDeliveryDiag("resolve.surface.entry", [
+                ("inv", diagShort(invocationSurfaceId)),
+                ("rec", diagShort(recordedSurfaceId)),
+                ("ws", diagShort(mappedSession?.workspaceId ?? routing.workspaceArg))])
+            guard let invocationSurfaceId else {
+                stopDeliveryDiag("resolve.surface.noInvocation")
+                return nil
+            }
             if let recordedSurfaceId, recordedSurfaceId != invocationSurfaceId {
                 guard let recordedWorkspaceId = nonEmptyClaudeHookIdentifier(mappedSession?.workspaceId),
                       !claudeHookSurfaceIsListed(
                           recordedSurfaceId,
                           workspaceId: recordedWorkspaceId,
                           client: client
-                      ) else { return nil }
+                      ) else {
+                    stopDeliveryDiag("resolve.surface.recordedListedReject", [
+                        ("rec", diagShort(recordedSurfaceId))])
+                    return nil
+                }
             }
             switch liveAgentSurfaceDeliveryTarget(
                 surfaceId: invocationSurfaceId,
@@ -115,14 +178,21 @@ extension CMUXCLI {
                 client: client
             ) {
             case .resolved(let live):
+                stopDeliveryDiag("resolve.surface.resolved", [
+                    ("ws", diagShort(live.workspaceId)), ("surf", diagShort(live.surfaceId))])
                 return live
             case .unsupported:
                 // Older apps do not expose the resolver. Preserve the
                 // validated legacy chain used before live re-homing existed.
+                stopDeliveryDiag("resolve.surface.unsupported")
                 break
-            case .failed, .notAttempted:
+            case .failed:
                 // A present resolver rejected this invocation identity (or
                 // the identity could not be formed), so stay fail-closed.
+                stopDeliveryDiag("resolve.surface.failed")
+                return nil
+            case .notAttempted:
+                stopDeliveryDiag("resolve.surface.notAttempted")
                 return nil
             }
         }
@@ -136,8 +206,12 @@ extension CMUXCLI {
             // Every workspace claim is dead (e.g. the recorded workspace was
             // closed after its pane moved out): follow the identity surface to
             // whichever workspace owns it now, else stay a no-op.
-            guard rehomeAllowed else { return nil }
-            return rehomedClaudeHookDeliveryTarget(
+            stopDeliveryDiag("resolve.workspace.unresolved")
+            guard rehomeAllowed else {
+                stopDeliveryDiag("resolve.workspace.unresolved.reject")
+                return nil
+            }
+            let rehomed = rehomedClaudeHookDeliveryTarget(
                 surfaceId: mappedSession?.surfaceId,
                 claimedWorkspaceId: mappedSession?.workspaceId,
                 client: client
@@ -146,6 +220,8 @@ extension CMUXCLI {
                 claimedWorkspaceId: routing.workspaceArg,
                 client: client
             )
+            stopDeliveryDiag("resolve.workspace.rehomed", [("ok", rehomed == nil ? "0" : "1")])
+            return rehomed
         }
         // The record's workspace died (the legacy chain resolved a DIFFERENT
         // workspace than the session recorded): the record surface's current
@@ -188,9 +264,14 @@ extension CMUXCLI {
                 client: client
             )
             if let rehomed {
+                stopDeliveryDiag("resolve.legacy.rehomed", [("surf", diagShort(rehomed.surfaceId))])
                 return rehomed
             }
         }
+        stopDeliveryDiag("resolve.legacy.final", [
+            ("ws", diagShort(workspaceId)),
+            ("surf", diagShort(resolvedSurface.surfaceId)),
+            ("auth", resolvedSurface.isAuthoritative ? "1" : "0")])
         return AgentHookDeliveryTarget(
             workspaceId: workspaceId,
             surfaceId: resolvedSurface.surfaceId,
