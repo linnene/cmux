@@ -1,0 +1,116 @@
+name: Fork CLI validation build
+on:
+  push:
+    branches: [codex/claude-stop-fix-validation]
+permissions:
+  contents: read
+concurrency:
+  group: claude-stop-fix-validation
+  cancel-in-progress: false
+jobs:
+  cli:
+    if: github.repository == 'linnene/cmux'
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      CMUX_DEV_BACKEND_MODE: local
+      CMUX_SKIP_ZIG_BUILD: '1'
+      CMUX_GHOSTTYKIT_PREPROVISIONED: '1'
+      GHOSTTYKIT_DOWNLOAD_RETRIES: '3'
+      GHOSTTYKIT_DOWNLOAD_MAX_TIME: '180'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: ./scripts/select-ci-xcode.sh
+      - name: Fetch native build inputs
+        run: git submodule update --init --depth 1 vendor/bonsplit ghostty
+      - name: Fetch pinned GhosttyKit
+        run: ./scripts/download-prebuilt-ghosttykit.sh
+      - name: Restore release DerivedData (exact key, miss allowed)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/viewer-app-dd
+          key: viewer-cli-release-v1-macOS-ARM64-41674415915
+          fail-on-cache-miss: false
+      - name: Build cmux-cli only
+        id: build
+        timeout-minutes: 45
+        run: |
+          set -uo pipefail
+          DIAG="$RUNNER_TEMP/diag"
+          mkdir -p "$DIAG"
+          printf '%s\n' 'SWIFT_ENABLE_BATCH_MODE = YES' 'COMPILER_INDEX_STORE_ENABLE = NO' > "$RUNNER_TEMP/cli-release.xcconfig"
+          export XCODE_XCCONFIG_FILE="$RUNNER_TEMP/cli-release.xcconfig"
+          xcodebuild -project cmux.xcodeproj -scheme cmux-cli -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/viewer-app-dd" \
+            -resultBundlePath "$DIAG/build.xcresult" \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$DIAG/build.log"
+          rc=${PIPESTATUS[0]}
+          echo "XCODEBUILD_EXIT=$rc" | tee -a "$DIAG/build.log"
+          exit "$rc"
+      - name: Verify and stage the built CLI
+        run: |
+          set -euo pipefail
+          BIN="$RUNNER_TEMP/viewer-app-dd/Build/Products/Release/cmux"
+          test -x "$BIN"
+          mkdir -p "$RUNNER_TEMP/artifact"
+          cp "$BIN" "$RUNNER_TEMP/artifact/cmux"
+          chmod 755 "$RUNNER_TEMP/artifact/cmux"
+          {
+            echo "product_sha=$(git rev-parse HEAD)"
+            echo "validation_sha=${GITHUB_SHA}"
+            echo "xcode=$(xcodebuild -version | tr '\n' ' ')"
+            echo "swift=$(swiftc --version 2>&1 | head -1)"
+            echo "cli_sha256=$(shasum -a 256 "$RUNNER_TEMP/artifact/cmux" | cut -d' ' -f1)"
+          } | tee "$RUNNER_TEMP/artifact/metadata.txt"
+      - name: Upload raw CLI and metadata before tests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmux-cli-raw
+          path: ${{ runner.temp }}/artifact
+          retention-days: 3
+          if-no-files-found: warn
+      - name: Extract xcresult issues
+        if: always()
+        run: |
+          DIAG="$RUNNER_TEMP/diag"
+          if [ -d "$DIAG/build.xcresult" ]; then
+            xcrun xcresulttool get --legacy --path "$DIAG/build.xcresult" --format json > "$DIAG/xcresult.json" 2>"$DIAG/xcresult.err" || true
+            xcrun xcresulttool get build-results --path "$DIAG/build.xcresult" --format json > "$DIAG/build-results.json" 2>>"$DIAG/xcresult.err" || true
+          fi
+      - name: Run focused viewer tests
+        if: steps.build.outcome == 'success'
+        run: |
+          set +e
+          CLI="$RUNNER_TEMP/artifact/cmux"
+          if [ ! -x "$CLI" ]; then echo "CLI artifact is not executable: $CLI"; exit 1; fi
+          rc=0
+          run() {
+            echo "=== $* ==="
+            "$@"
+            status=$?
+            echo "SUITE_EXIT($status): $*"
+            if [ "$status" -ne 0 ]; then rc=1; fi
+            return 0
+          }
+          run env CMUX_CLI_BIN="$CLI" python3 tests/test_claude_viewer_routing_target.py
+          run env CMUX_CLI_BIN="$CLI" python3 tests/test_claude_viewer_active_session.py
+          run env CMUX_CLI_BIN="$CLI" python3 tests/test_process_generation_cli.py
+          run python3 tests/test_claude_hook_recorded_surface_policy.py
+          run python3 tests/test_claude_attached_viewer_policy.py
+          run python3 tests/test_agent_hook_environment_identity.py
+          run python3 tests/test_claude_viewer_identity_chain.py
+          run node --test tests/test_claude_attach_observer.cjs
+          run env CMUX_CLI_BIN="$CLI" python3 tests/test_claude_viewer_store_lifecycle.py
+          echo "FOCUSED_TEST_EXIT=$rc"
+          exit "$rc"
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-build-diagnostics
+          path: ${{ runner.temp }}/diag
+          retention-days: 3
+          if-no-files-found: warn
